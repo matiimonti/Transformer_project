@@ -10,16 +10,17 @@ Pipeline:
 
 import os
 import re
+from typing import List
 
-## Parsing PNG - based after first look at original dataset
-def parse_png(png_data: str) -> List[List[str]]:
-    """ Parse a PNG string into a list of games, each a list of moves."""
+## Parsing PGN - based after first look at original dataset
+def parse_pgn(pgn_text: str) -> List[List[str]]:
+    """ Parse a PGN string into a list of games, each a list of moves."""
 
     games = []
 
-    # Split into individual game blocks 
+    # Split into individual game blocks
     # Each game is separated by a blank line between the moves and the next game's header.
-    
+
     # Normalize line endings
     pgn_text = pgn_text.replace('\r\n', '\n').replace('\r', '\n')
 
@@ -54,9 +55,4 @@ def parse_png(png_data: str) -> List[List[str]]:
             games.append(moves)
 
     return games
-
-
-
-if __name__ == 'main':
-    pass
 
