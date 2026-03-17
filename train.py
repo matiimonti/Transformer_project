@@ -1,0 +1,322 @@
+"""
+train.py — Training loop for ChessTransformer.
+"""
+
+import sys
+import math
+import time
+import json
+import argparse
+from pathlib import Path
+
+import torch
+import torch.nn as nn
+from torch.utils.data import DataLoader, Subset
+
+sys.path.insert(0, str(Path(__file__).parent / "src"))
+
+from model import ChessTransformer
+from pgn_data import load_data, ChessTokenizer
+from attention import (
+    MultiHeadAttention,
+    RoPEMultiHeadAttention,
+    GroupedQueryAttention,
+    SlidingWindowAttention,
+)
+
+
+# Attention factory
+
+
+def make_attention_factory(config: dict):
+    """
+    Returns a callable that creates one attention module per transformer layer.
+    All variant-specific parameters (kv_heads, window_size) stay here.
+    model.py never needs to know which variant is being used.
+    """
+    variant     = config["variant"]
+    d_model     = config["d_model"]
+    n_heads     = config["n_heads"]
+    dropout     = config["dropout"]
+    kv_heads    = config.get("kv_heads", n_heads // 2)
+    window_size = config.get("window_size", 32)
+    max_seq_len = config["seq_len"]
+
+    if variant == "vanilla":
+        return lambda: MultiHeadAttention(d_model, n_heads, dropout)
+    elif variant == "rope":
+        return lambda: RoPEMultiHeadAttention(d_model, n_heads, max_seq_len, dropout)
+    elif variant == "gqa":
+        return lambda: GroupedQueryAttention(d_model, n_heads, kv_heads, dropout)
+    elif variant == "sparse":
+        return lambda: SlidingWindowAttention(d_model, n_heads, window_size, dropout)
+    else:
+        raise ValueError(f"Unknown variant: {variant}")
+
+
+
+### Learning rate schedule
+
+def get_lr(step: int, warmup_steps: int, max_steps: int, max_lr: float, min_lr: float) -> float:
+    """
+    Linear warmup then cosine decay.
+
+    Warmup prevents large gradient updates in early training when
+    the model weights are random and loss is high.
+    Cosine decay smoothly reduces LR to min_lr over training.
+    """
+    if step < warmup_steps:
+        return max_lr * step / max_steps
+    if step >= max_steps:
+        return min_lr
+    progress = (step - warmup_steps) / (max_steps - warmup_steps)
+    cosine_decay = 0.5 * (1 + math.cos(math.pi * progress))
+    return min_lr + (max_lr - min_lr) * cosine_decay
+
+
+
+### Evaluation
+
+@torch.no_grad()
+def evaluate(model: nn.Module, loader: DataLoader, device: torch.device) -> float:
+    """Returns average validation loss (used to compute perplexity = exp(loss))."""
+    model.eval()
+    total_loss    = 0.0
+    total_batches = 0
+
+    for x, y in loader:
+        x, y = x.to(device), y.to(device)
+        _, loss = model(x, targets=y)
+        total_loss += loss.item()
+        total_batches += 1
+
+    model.train()
+    return total_loss / max(total_batches, 1)
+
+
+@torch.no_grad()
+def evaluate_move_legality(
+    model: nn.Module,
+    tokenizer: ChessTokenizer,
+    device: torch.device,
+    n_games: int = 50,
+) -> float:
+    """
+    Generates n_games sequences and checks what fraction of moves are
+    valid move tokens (not special tokens like PAD, UNK).
+    Proxy for move legality — fast alternative to full chess rule checking.
+    """
+    model.eval()
+    legal_count = 0
+    total_count = 0
+
+    seed = torch.tensor([[tokenizer.bos_id]], device=device)
+
+    for _ in range(n_games):
+        generated = model.generate(seed, max_new_tokens=20, temperature=1.0, top_k=40)
+        tokens    = generated[0].tolist()
+        moves     = tokenizer.decode(tokens[1:])  # skip BOS
+
+        for move in moves:
+            if move in ("<EOS>", "<PAD>"):
+                break
+            total_count += 1
+            if move not in ("<UNK>", "<PAD>", "<BOS>", "<EOS>"):
+                legal_count += 1
+
+    model.train()
+    return legal_count / max(total_count, 1)
+
+
+### Training loop
+
+def train(config: dict):
+
+    ### Device
+    device = torch.device(
+        "cuda" if torch.cuda.is_available()
+        else "mps" if torch.backends.mps.is_available()
+        else "cpu"
+    )
+    print(f"Using device: {device}")
+
+    out_dir = Path(config["out_dir"])
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    ### Data
+    dataset, tokenizer = load_data(
+        pgn_path=config.get("pgn_path", "data/games.pgn"),
+        seq_len=config["seq_len"],
+        max_games=config.get("max_games"),
+    )
+    tokenizer.save(str(out_dir / "tokenizer.json"))
+
+    split        = int(len(dataset) * config["train_split"])
+    train_ds     = Subset(dataset, range(split))
+    val_ds       = Subset(dataset, range(split, len(dataset)))
+    train_loader = DataLoader(train_ds, batch_size=config["batch_size"], shuffle=True,  num_workers=config["num_workers"])
+    val_loader   = DataLoader(val_ds,   batch_size=config["batch_size"], shuffle=False, num_workers=config["num_workers"])
+
+    print(f"Train samples: {len(train_ds)} | Val samples: {len(val_ds)}")
+
+    ### Model
+    model = ChessTransformer(
+        vocab_size=tokenizer.vocab_size,
+        attention_factory=make_attention_factory(config),
+        d_model=config["d_model"],
+        n_layers=config["n_layers"],
+        max_seq_len=config["seq_len"],
+        dropout=config["dropout"],
+        use_sinusoidal_pe=config["variant"] != "rope",
+    ).to(device)
+
+    n_params = model.count_parameters()
+    print(f"Variant: {config['variant']} | Parameters: {n_params:,}")
+
+    ### Optimizer
+    decay_params   = [p for n, p in model.named_parameters() if p.dim() >= 2]
+    nodecay_params = [p for n, p in model.named_parameters() if p.dim() < 2]
+    optimizer = torch.optim.AdamW(
+        [
+            {"params": decay_params,   "weight_decay": config["weight_decay"]},
+            {"params": nodecay_params, "weight_decay": 0.0},
+        ],
+        lr=config["max_lr"],
+        betas=(0.9, 0.95),
+        eps=1e-8,
+    )
+
+    ### Training loop
+    step          = 0
+    max_steps     = config["max_steps"]
+    warmup_steps  = config.get("warmup_steps", max_steps // 10)
+    best_val_loss = float("inf")
+    metrics_log   = []
+
+    print(f"\nStarting training: {max_steps} steps, warmup {warmup_steps} steps")
+    print("-" * 60)
+
+    model.train()
+    train_iter = iter(train_loader)
+    t0 = time.time()
+
+    while step < max_steps:
+        try:
+            x, y = next(train_iter)
+        except StopIteration:
+            train_iter = iter(train_loader)
+            x, y = next(train_iter)
+
+        x, y = x.to(device), y.to(device)
+
+        # Update learning rate
+        lr = get_lr(step, warmup_steps, max_steps, config["max_lr"], config["min_lr"])
+        for param_group in optimizer.param_groups:
+            param_group["lr"] = lr
+
+        # Forward + backward
+        _, loss = model(x, targets=y)
+        optimizer.zero_grad()
+        loss.backward()
+
+        # Gradient clipping
+        grad_norm = nn.utils.clip_grad_norm_(model.parameters(), config["grad_clip"])
+
+        optimizer.step()
+        step += 1
+
+        # Logging
+        if step % config["log_interval"] == 0:
+            t1 = time.time()
+            dt = t1 - t0
+            t0 = t1
+            tokens_per_sec = config["batch_size"] * config["seq_len"] * config["log_interval"] / dt
+            print(
+                f"step {step:5d} | loss {loss.item():.4f} | "
+                f"lr {lr:.2e} | grad_norm {grad_norm:.3f} | "
+                f"{tokens_per_sec:.0f} tok/s"
+            )
+
+        # Validation
+        if step % config["eval_interval"] == 0:
+            val_loss = evaluate(model, val_loader, device)
+            val_ppl  = math.exp(min(val_loss, 20))
+            legality = evaluate_move_legality(model, tokenizer, device)
+
+            print(f"\n{'='*60}")
+            print(f"Step {step} | Val Loss: {val_loss:.4f} | Val PPL: {val_ppl:.2f} | Move Legality: {legality:.1%}")
+            print(f"{'='*60}\n")
+
+            metrics_log.append({
+                "step":          step,
+                "val_loss":      val_loss,
+                "val_ppl":       val_ppl,
+                "move_legality": legality,
+                "lr":            lr,
+            })
+
+            with open(out_dir / "metrics.json", "w") as f:
+                json.dump(metrics_log, f, indent=2)
+
+            if val_loss < best_val_loss:
+                best_val_loss = val_loss
+                checkpoint = {
+                    "step":                 step,
+                    "model_state":          model.state_dict(),
+                    "optimizer_state":      optimizer.state_dict(),
+                    "config":               config,
+                    "val_loss":             val_loss,
+                    "tokenizer_vocab_size": tokenizer.vocab_size,
+                }
+                torch.save(checkpoint, out_dir / "best_model.pt")
+                print(f"Saved best model (val_loss={val_loss:.4f})")
+
+    print(f"\nTraining complete. Best val loss: {best_val_loss:.4f}")
+    return metrics_log
+
+
+#### CLI
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Train ChessTransformer")
+
+    # Data
+    parser.add_argument("--pgn_path",    type=str,   default="data/games.pgn")
+    parser.add_argument("--max_games",   type=int,   default=None)
+    parser.add_argument("--seq_len",     type=int,   default=128)
+    parser.add_argument("--train_split", type=float, default=0.9)
+
+    # Model
+    parser.add_argument("--variant",     type=str,   default="vanilla",
+                        choices=["vanilla", "rope", "gqa", "sparse"])
+    parser.add_argument("--d_model",     type=int,   default=128)
+    parser.add_argument("--n_heads",     type=int,   default=4)
+    parser.add_argument("--n_layers",    type=int,   default=4)
+    parser.add_argument("--dropout",     type=float, default=0.1)
+    parser.add_argument("--kv_heads",    type=int,   default=2)
+    parser.add_argument("--window_size", type=int,   default=32)
+
+    # Training
+    parser.add_argument("--batch_size",   type=int,   default=64)
+    parser.add_argument("--num_workers",  type=int,   default=2)
+    parser.add_argument("--max_steps",    type=int,   default=5000)
+    parser.add_argument("--max_lr",       type=float, default=3e-4)
+    parser.add_argument("--min_lr",       type=float, default=3e-5)
+    parser.add_argument("--weight_decay", type=float, default=0.1)
+    parser.add_argument("--grad_clip",    type=float, default=1.0)
+    parser.add_argument("--warmup_steps", type=int,   default=500)
+
+    # Logging
+    parser.add_argument("--log_interval",  type=int, default=50)
+    parser.add_argument("--eval_interval", type=int, default=500)
+    parser.add_argument("--out_dir",       type=str, default="checkpoints/vanilla")
+
+    return vars(parser.parse_args())
+
+
+if __name__ == "__main__":
+    config = parse_args()
+    config["out_dir"] = f"checkpoints/{config['variant']}"
+    train(config)
+
+
