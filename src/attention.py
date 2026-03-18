@@ -100,3 +100,114 @@ class MultiHeadAttention(nn.Module):
         out = out.transpose(1, 2).contiguous().view(B, T, C)
         return self.out_proj(out)
 
+
+##############################
+#### RoPE helper functions ###
+##############################
+
+def precompute_rope_freqs(
+    head_dim: int,
+    max_seq_len: int,
+    device: torch.device,
+    theta: float = 10000.0,
+):
+    """
+    Precomputes cos/sin tables for RoPE.
+
+    RoPE encodes position by *rotating* query and key vectors rather than
+    adding a fixed vector. This gives better length generalisation and is
+    used in LLaMA, Mistral, Gemma, and most modern open models.
+
+    The rotation matrix for position m and dimension pair (2i, 2i+1) is:
+        R(m, i) = [[cos(m * theta_i), -sin(m * theta_i)],
+                   [sin(m * theta_i),  cos(m * theta_i)]]
+    where theta_i = 10000^(-2i/d).
+
+    cos/sin are duplicated across the full head_dim so they can be applied
+    with a single elementwise multiply — no slicing needed at runtime.
+    """
+    assert head_dim % 2 == 0
+    # θ_i = 1 / 10000^(2i/head_dim),  shape: (head_dim/2,)
+    freqs = 1.0 / (theta ** (torch.arange(0, head_dim, 2, device=device).float() / head_dim))
+    # positions × frequencies,  shape: (max_seq_len, head_dim/2)
+    positions = torch.arange(max_seq_len, device=device).float()
+    freqs = torch.outer(positions, freqs)
+    # duplicate so final shape is (max_seq_len, head_dim)
+    cos = torch.cat([freqs.cos(), freqs.cos()], dim=-1)
+    sin = torch.cat([freqs.sin(), freqs.sin()], dim=-1)
+    return cos, sin
+
+
+def rotate_half(x: torch.Tensor) -> torch.Tensor:
+    """
+    Rotates the second half of the last dimension into the first half.
+    [-x2, x1] is the 90-degree rotation needed to implement the RoPE formula.
+    """
+    x1 = x[..., : x.shape[-1] // 2]
+    x2 = x[..., x.shape[-1] // 2 :]
+    return torch.cat([-x2, x1], dim=-1)
+
+
+def apply_rope(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
+    """
+    Apply rotary embeddings to a (B, heads, T, head_dim) tensor.
+
+    x * cos + rotate_half(x) * sin expands to:
+        first half:  x1*cos - x2*sin
+        second half: x2*cos + x1*sin
+    which is exactly the 2D rotation matrix applied to each dimension pair.
+    """
+    T = x.size(2)
+    cos = cos[:T].unsqueeze(0).unsqueeze(0)  # (1, 1, T, head_dim)
+    sin = sin[:T].unsqueeze(0).unsqueeze(0)
+    return x * cos + rotate_half(x) * sin
+
+
+################################################################
+#### Variant 2: Multi-Head Attention with Rotary Embeddings ####
+################################################################
+
+class RoPEMultiHeadAttention(nn.Module):
+    """
+    MHA where position is encoded via rotation of Q and K vectors (RoPE).
+    """
+
+    def __init__(self, d_model: int, n_heads: int, max_seq_len: int = 512, dropout: float = 0.1):
+        super().__init__()
+        assert d_model % n_heads == 0
+
+        self.d_model  = d_model
+        self.n_heads  = n_heads
+        self.head_dim = d_model // n_heads
+        self.dropout  = dropout
+
+        self.qkv_proj = nn.Linear(d_model, 3 * d_model, bias=False)
+        self.out_proj = nn.Linear(d_model, d_model, bias=False)
+
+        # Precompute and register as buffer — moves to GPU automatically with .to(device)
+        cos, sin = precompute_rope_freqs(self.head_dim, max_seq_len, device=torch.device("cpu"))
+        self.register_buffer("rope_cos", cos)
+        self.register_buffer("rope_sin", sin)
+
+    def forward(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None):
+        B, T, C = x.shape
+
+        qkv = self.qkv_proj(x)
+        q, k, v = qkv.split(self.d_model, dim=-1)
+
+        def reshape(t):
+            return t.view(B, T, self.n_heads, self.head_dim).transpose(1, 2)
+
+        q, k, v = reshape(q), reshape(k), reshape(v)
+
+        # Apply rotary embeddings to Q and K only — V is not rotated
+        q = apply_rope(q, self.rope_cos, self.rope_sin)
+        k = apply_rope(k, self.rope_cos, self.rope_sin)
+
+        out = scaled_dot_product_attention(
+            q, k, v, mask=mask, dropout=self.dropout, training=self.training
+        )
+
+        out = out.transpose(1, 2).contiguous().view(B, T, C)
+        return self.out_proj(out)
+
