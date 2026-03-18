@@ -190,7 +190,13 @@ class ChessDataset(Dataset):
 
 
 ### Full pipeline
-def load_data(pgn_path: str, seq_len: int = 128, max_games=None, max_bytes=None):
+def load_data(
+    pgn_path: str,
+    seq_len: int = 128,
+    max_games: Optional[int] = None,
+    max_bytes: Optional[int] = None,
+    train_split: float = 0.9,
+):
     with open(pgn_path, 'r', encoding='utf-8', errors='ignore') as f:
         text = f.read(max_bytes) if max_bytes else f.read()
 
@@ -206,11 +212,23 @@ def load_data(pgn_path: str, seq_len: int = 128, max_games=None, max_bytes=None)
     if max_games:
         games = games[:max_games]
 
+    # Split at the game level — before building overlapping windows.
+    # Splitting on samples after the fact allows chunks from the same game
+    # to appear in both train and val (data leakage).
+    split = int(len(games) * train_split)
+    train_games = games[:split]
+    val_games   = games[split:]
+
+    # Build vocabulary from training games only
     tokenizer = ChessTokenizer()
-    tokenizer.build_from_games(games)
+    tokenizer.build_from_games(train_games)
 
-    encoded = [tokenizer.encode(g) for g in games]
-    dataset = ChessDataset(encoded, seq_len=seq_len, pad_id=tokenizer.pad_id)
-    print(f"Total samples: {len(dataset)}")
+    train_encoded = [tokenizer.encode(g) for g in train_games]
+    val_encoded   = [tokenizer.encode(g) for g in val_games]
 
-    return dataset, tokenizer
+    train_dataset = ChessDataset(train_encoded, seq_len=seq_len, pad_id=tokenizer.pad_id)
+    val_dataset   = ChessDataset(val_encoded,   seq_len=seq_len, pad_id=tokenizer.pad_id)
+
+    print(f"Train samples: {len(train_dataset)} | Val samples: {len(val_dataset)}")
+
+    return train_dataset, val_dataset, tokenizer

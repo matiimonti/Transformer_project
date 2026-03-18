@@ -11,7 +11,7 @@ from pathlib import Path
 
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader, Subset
+from torch.utils.data import DataLoader
 
 sys.path.insert(0, str(Path(__file__).parent / "src"))
 
@@ -66,7 +66,7 @@ def get_lr(step: int, warmup_steps: int, max_steps: int, max_lr: float, min_lr: 
     Cosine decay smoothly reduces LR to min_lr over training.
     """
     if step < warmup_steps:
-        return max_lr * step / max_steps
+        return max_lr * step / warmup_steps
     if step >= max_steps:
         return min_lr
     progress = (step - warmup_steps) / (max_steps - warmup_steps)
@@ -144,20 +144,16 @@ def train(config: dict):
     out_dir.mkdir(parents=True, exist_ok=True)
 
     ### Data
-    dataset, tokenizer = load_data(
+    train_ds, val_ds, tokenizer = load_data(
         pgn_path=config.get("pgn_path", "data/games.pgn"),
         seq_len=config["seq_len"],
         max_games=config.get("max_games"),
+        train_split=config["train_split"],
     )
     tokenizer.save(str(out_dir / "tokenizer.json"))
 
-    split        = int(len(dataset) * config["train_split"])
-    train_ds     = Subset(dataset, range(split))
-    val_ds       = Subset(dataset, range(split, len(dataset)))
     train_loader = DataLoader(train_ds, batch_size=config["batch_size"], shuffle=True,  num_workers=config["num_workers"])
     val_loader   = DataLoader(val_ds,   batch_size=config["batch_size"], shuffle=False, num_workers=config["num_workers"])
-
-    print(f"Train samples: {len(train_ds)} | Val samples: {len(val_ds)}")
 
     ### Model
     model = ChessTransformer(
@@ -215,8 +211,8 @@ def train(config: dict):
             param_group["lr"] = lr
 
         # Forward + backward
-        _, loss = model(x, targets=y)
         optimizer.zero_grad()
+        _, loss = model(x, targets=y)
         loss.backward()
 
         # Gradient clipping

@@ -191,20 +191,25 @@ class ChessTransformer(nn.Module):
         temperature > 1.0 -> flatter, more random outputs
         top_k             -> only sample from the top-k most likely tokens
         """
+        was_training = self.training
         self.eval()
-        for _ in range(max_new_tokens):
-            idx_cond = idx[:, -self.max_seq_len:]
-            logits, _ = self(idx_cond)
-            logits = logits[:, -1, :] / temperature
- 
-            if top_k is not None:
-                values, _ = torch.topk(logits, min(top_k, logits.size(-1)))
-                logits[logits < values[:, [-1]]] = float('-inf')
- 
-            probs      = F.softmax(logits, dim=-1)
-            next_token = torch.multinomial(probs, num_samples=1)
-            idx        = torch.cat([idx, next_token], dim=1)
- 
+        try:
+            for _ in range(max_new_tokens):
+                idx_cond = idx[:, -self.max_seq_len:]
+                logits, _ = self(idx_cond)
+                logits = logits[:, -1, :] / temperature
+
+                if top_k is not None:
+                    values, _ = torch.topk(logits, min(top_k, logits.size(-1)))
+                    logits[logits < values[:, [-1]]] = float('-inf')
+
+                probs      = F.softmax(logits, dim=-1)
+                next_token = torch.multinomial(probs, num_samples=1)
+                idx        = torch.cat([idx, next_token], dim=1)
+        finally:
+            if was_training:
+                self.train()
+
         return idx
  
     def count_parameters(self) -> int:

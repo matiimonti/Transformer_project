@@ -41,7 +41,6 @@ def scaled_dot_product_attention(
     dot products grow large in magnitude, pushing softmax into flat regions.
     """
     head_dim = q.size(-1)
-    scale = math.sqrt(head_dim)
 
     # (B, heads, T, T)
     scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(head_dim)
@@ -57,7 +56,7 @@ def scaled_dot_product_attention(
 
     return torch.matmul(attn_weights, v)
 
-## Casual mask
+## Causal mask
 # Verify by hand that position 0 can only attend to position 0, position 1 to positions 0-1, etc
 def causal_mask(seq_len: int, device: torch.device) -> torch.Tensor:
     """Upper-triangular mask — prevents position i from attending to j > i."""
