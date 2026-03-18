@@ -269,3 +269,69 @@ class GroupedQueryAttention(nn.Module):
         out = out.transpose(1, 2).contiguous().view(B, T, C)
         return self.out_proj(out)
 
+
+#########################################################
+#### Variant 4: Sparse / Sliding-Window Attention    ####
+#########################################################
+
+class SlidingWindowAttention(nn.Module):
+    """
+    Each token attends only to the previous `window_size` tokens (local attention).
+
+    Reduces complexity from O(T^2) to O(T * window_size).
+    Used in: Longformer, BigBird, Mistral's sliding window layers.
+
+    For chess sequences (length ~60-80), this is a mild constraint but
+    illustrates the principle clearly and benchmarks well.
+    """
+
+    def __init__(self, d_model: int, n_heads: int, window_size: int = 32, dropout: float = 0.1):
+        super().__init__()
+        assert d_model % n_heads == 0
+
+        self.d_model     = d_model
+        self.n_heads     = n_heads
+        self.head_dim    = d_model // n_heads
+        self.window_size = window_size
+        self.dropout     = dropout
+
+        self.qkv_proj = nn.Linear(d_model, 3 * d_model, bias=False)
+        self.out_proj  = nn.Linear(d_model, d_model, bias=False)
+
+    def _sparse_mask(self, seq_len: int, device: torch.device) -> torch.Tensor:
+        """
+        Combines causal mask with local window mask.
+        True = blocked. Position i can attend to positions max(0, i-window_size) ... i.
+
+        distance[i, j] = j - i
+        out_of_window: j < i - window_size  (too far in the past)
+        causal:        j > i                (future — always blocked)
+        Result: a causal band of width window_size.
+        """
+        causal = causal_mask(seq_len, device)
+        positions = torch.arange(seq_len, device=device)
+        distance = positions.unsqueeze(0) - positions.unsqueeze(1)  # (T, T)
+        out_of_window = distance < -self.window_size
+        return causal | out_of_window
+
+    def forward(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None):
+        B, T, C = x.shape
+
+        qkv = self.qkv_proj(x)
+        q, k, v = qkv.split(self.d_model, dim=-1)
+
+        def reshape(t):
+            return t.view(B, T, self.n_heads, self.head_dim).transpose(1, 2)
+
+        q, k, v = reshape(q), reshape(k), reshape(v)
+
+        # Always use the sliding window mask — ignore any passed-in mask
+        sparse_mask = self._sparse_mask(T, x.device)
+
+        out = scaled_dot_product_attention(
+            q, k, v, mask=sparse_mask, dropout=self.dropout, training=self.training
+        )
+
+        out = out.transpose(1, 2).contiguous().view(B, T, C)
+        return self.out_proj(out)
+
