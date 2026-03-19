@@ -1,0 +1,4 @@
+torch>=2.1.0
+matplotlib>=3.7.0
+chess>=1.10.0
+zstandard>=0.21.0
