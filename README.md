@@ -1,4 +1,4 @@
-# Transformer Ablation Lab — Chess PGN
+# Transformer Ablation Project — Chess PGN
 
 > Implemented a transformer from scratch in PyTorch with RoPE, GQA, and sparse attention variants, trained on 120K chess games — benchmarked architecture tradeoffs across perplexity, memory, and move legality rate.
 
@@ -30,7 +30,7 @@ A controlled comparison of four transformer attention variants, all trained on i
 
 ### Key findings
 
-- **RoPE is the clear winner** — 2.6× lower perplexity (78.34 vs 204.47) and +6.8pp legality over vanilla MHA with identical parameter count. Chess moves have strong relative-position dependencies (what happened 2–4 moves ago matters); RoPE captures this through rotation rather than absolute position encoding.
+- **RoPE is the best one** — 2.6× lower perplexity (78.34 vs 204.47) and +6.8pp legality over vanilla MHA with identical parameter count. Chess moves have strong relative-position dependencies (what happened 2–4 moves ago matters); RoPE captures this through rotation rather than absolute position encoding.
 - **GQA** — 4.7% fewer parameters, essentially identical quality to vanilla MHA. The right choice when inference memory matters: KV cache shrinks by `n_heads / kv_heads = 2×` with no measurable quality cost.
 - **Sliding Window** — matches vanilla MHA, as expected. True compute savings require custom CUDA kernels (Longformer, Flash Attention); a dense mask with `-inf` in PyTorch reduces quality without reducing FLOPs.
 - **torch.compile on T4** — measured 0.90× speedup (marginally slower) due to insufficient SMs for the most aggressive kernel autotune. Compile gains are more pronounced on A100/H100.
@@ -92,7 +92,7 @@ Logits over vocabulary
 Standard scaled dot-product attention with causal mask and sinusoidal positional encoding. Baseline for all comparisons.
 
 ### RoPE MHA
-Position is encoded by **rotating** query and key vectors before the dot product, rather than adding a fixed vector to the input. Used in LLaMA, Gemma, Mistral. Gives better relative-position awareness — particularly useful for sequential data like chess.
+Position is encoded by **rotating** query and key vectors before the dot product, rather than adding a fixed vector to the input. Used in LLaMA, Gemma, Mistral. Gives better relative-position awareness (particularly useful for sequential data like chess).
 
 ### Grouped Query Attention (GQA)
 Fewer K/V heads than Q heads (`kv_heads=2`, `n_heads=4`). Each K/V head is shared by `n_heads // kv_heads = 2` query heads. Used in LLaMA-2 70B, Mistral 7B, Falcon. Reduces KV-cache memory at inference by `n_heads / kv_heads`.
@@ -101,7 +101,7 @@ Fewer K/V heads than Q heads (`kv_heads=2`, `n_heads=4`). Each K/V head is share
 - `kv_heads == 1` → Multi-Query Attention (MQA)
 
 ### Sliding Window Attention
-Each token attends only to the previous `window_size=32` tokens. Reduces theoretical complexity from O(T²) to O(T·W). Used in Longformer, BigBird, Mistral. **Note:** this implementation uses a dense mask for pedagogical clarity; production speed gains require custom CUDA kernels.
+Each token attends only to the previous `window_size=32` tokens. Reduces theoretical complexity from O(T²) to O(T·W). Used in Longformer, BigBird, Mistral.
 
 ---
 
@@ -138,7 +138,6 @@ Sequences open with recognisable patterns (Ruy López exchange, King's Indian, E
 ├── benchmark.py          # Throughput measurement, torch.compile() speedup, plots
 ├── scale.py              # Scaling law experiment (1M / 5M / 20M param models)
 ├── notebooks/
-│   ├── train_notebook.ipynb   # Interactive exploration
 │   └── train_gpu.ipynb        # Full training + benchmark (Colab GPU)
 └── requirements.txt
 ```
@@ -188,7 +187,7 @@ Or run `notebooks/train_gpu.ipynb` end-to-end on **Google Colab (T4 GPU)** — i
 
 ## Design Notes
 
-**Why chess PGN?** Moves like `e4`, `Nf3`, `O-O` tokenize trivially (vocab ~2,000–5,000), the dataset is free and clean, and move legality gives a concrete domain-specific eval metric beyond perplexity — the kind of eval story that distinguishes research work from tutorial completions.
+**Why chess PGN?** Moves like `e4`, `Nf3`, `O-O` tokenize trivially (vocab ~2,000–5,000), the dataset is free and clean, and move legality gives a concrete domain-specific eval metric beyond perplexity.
 
 **Dependency Inversion for attention:** `ChessTransformer` never references a specific attention class. It receives an `attention_factory: Callable[[], nn.Module]` at construction time. Swapping variants requires changing one argument, not touching the model.
 
