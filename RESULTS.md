@@ -17,19 +17,19 @@
 
 ### 1. RoPE dramatically outperforms absolute positional encoding on sequential data
 
-RoPE achieves 2.6× lower perplexity (78.34 vs 204.47) and +6.8 percentage points in move legality (88.3% vs 81.5%) over vanilla MHA with an identical parameter count. The mechanism matters: chess moves are inherently relational — whether `Nf3` is a good move depends on what happened 2–4 moves earlier, not on its absolute position in the game. RoPE encodes this through rotation of query/key vectors, which means the attention score between positions i and j depends only on their *relative* offset (i−j). Sinusoidal PE added to the embedding does not have this property; the model must learn the relative structure implicitly, which is far harder with a small model and limited data.
+RoPE achieves 2.6× lower perplexity (78.34 vs 204.47) and +6.8 percentage points in move legality (88.3% vs 81.5%) over vanilla MHA with an identical parameter count. The mechanism matters: chess moves are inherently relational: whether `Nf3` is a good move depends on what happened 2–4 moves earlier, not on its absolute position in the game. RoPE encodes this through rotation of query/key vectors, meaning that the attention score between positions i and j depends only on their *relative* offset (i−j). Sinusoidal PE added to the embedding doesn't have this property; the model must learn the relative structure implicitly, which is far harder with a small model and limited data.
 
 This result mirrors what the broader literature found when RoPE was introduced in RoFormer and later adopted by LLaMA, Gemma, and Mistral: on tasks with strong local dependency structure, relative position encoding consistently outperforms absolute encoding, especially at smaller model sizes where the model cannot afford to learn the equivalence from scratch.
 
 ### 2. GQA achieves the same quality for less memory — the right inference tradeoff
 
-GQA (kv_heads=2, n_heads=4) uses 4.7% fewer parameters than vanilla MHA and produces essentially identical results: val loss 5.3075 vs 5.3204, move legality 83.0% vs 81.5% — differences well within noise given the stochastic training. The key benefit does not show up in this table: at inference, the KV cache is 2× smaller (one K/V head stored per 2 query heads). This is precisely why LLaMA-2 70B and Mistral 7B adopted GQA — not for quality, but because KV cache is the dominant memory bottleneck when serving large models at scale.
+GQA (kv_heads=2, n_heads=4) uses 4.7% fewer parameters than vanilla MHA and produces essentially identical results: val loss 5.3075 vs 5.3204, move legality 83.0% vs 81.5% — differences well within noise given the stochastic training. The key benefit does not show up in this table: at inference, the KV cache is 2× smaller (one K/V head stored per 2 query heads). This is precisely why LLaMA-2 70B and Mistral 7B adopted GQA, not for quality, but because KV cache is the dominant memory bottleneck when serving large models at scale.
 
-In this project, GQA's cache is stored at the `kv_heads` dimension in the attention module, so the memory saving is real and measurable: with `kv_heads=2` and `n_heads=4`, the cache tensor is half the size of vanilla MHA's. The tradeoff is clear: if deployment memory matters, GQA is a free lunch.
+In this project, GQA's cache is stored at the `kv_heads` dimension in the attention module, so the memory saving is real and measurable: with `kv_heads=2` and `n_heads=4`, the cache tensor is half the size of vanilla MHA's.
 
 ### 3. Sliding window attention needs custom kernels to deliver its theoretical gains
 
-Sliding window attention matches vanilla MHA in both quality (5.3596 vs 5.3204 val loss) and throughput (184K vs 184K tok/s). The result is expected: PyTorch's dense matrix multiply with a `-inf` mask does not skip any FLOPs — it computes the full O(T²) attention matrix and then zeros out the masked positions. The theoretical O(T·W) complexity only materializes with custom CUDA kernels (as used in Longformer and BigBird) or with Flash Attention's tiling approach. This implementation is pedagogically valuable for understanding the mask structure, but production deployments that need long-context efficiency require a lower-level implementation.
+Sliding window attention matches vanilla MHA in both quality (5.3596 vs 5.3204 val loss) and throughput (184K vs 184K tok/s). The result is expected: PyTorch's dense matrix multiply with a `-inf` mask does not skip any FLOPs, it computes the full O(T²) attention matrix and then zeros out the masked positions. The theoretical O(T·W) complexity only presents with custom CUDA kernels (as used in Longformer and BigBird) or with Flash Attention's tiling approach. This implementation is valuable for understanding the mask structure, but production deployments that need long-context efficiency require a lower-level implementation.
 
 ### 4. Throughput vs quality is a genuine tradeoff
 
@@ -51,7 +51,7 @@ Three model sizes were trained on the same data to check whether validation loss
 | Medium | 256 | 6 | 5,949,440 | 4.7494 | 115.51 |
 | Large | 512 | 6 | 21,336,064 | 4.7844 | 119.63 |
 
-All three sizes trained for 3,000 steps on the same 50K games. Loss decreases from small → medium as expected. The large model (21M params) converges slightly worse than medium (5M) at this compute budget — a known effect where larger models need more data and steps to reach their optimal loss. With 3,000 steps the large model is compute-limited, not data-limited. The script fits a power law L(C) = a · C^b in log space and overlays the fit on a log-log plot (`plots/scaling_laws.png`).
+All three sizes trained for 3,000 steps on the same 50K games. Loss decreases from small → medium as expected. The large model (21M params) converges slightly worse than medium (5M) at this compute budget (a known effect where larger models need more data and steps to reach their optimal loss). With 3,000 steps the large model is compute-limited, not data-limited. The script fits a power law L(C) = a · C^b in log space and overlays the fit on a log-log plot (`plots/scaling_laws.png`).
 
 ---
 
