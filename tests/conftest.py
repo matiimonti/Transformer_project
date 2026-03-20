@@ -5,7 +5,7 @@ Adds src/ to sys.path so all test files can import project modules
 without installing the package.
 """
 
-import sys
 import os
+import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))

@@ -20,16 +20,17 @@ from __future__ import annotations
 
 from typing import List, Optional
 
-import torch
 import matplotlib
-matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
+import torch
 
+matplotlib.use("Agg")
 
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
 
 def _get_tokens(tokenizer, idx: torch.Tensor) -> List[str]:
     """
@@ -42,7 +43,9 @@ def _get_tokens(tokenizer, idx: torch.Tensor) -> List[str]:
     if hasattr(tokenizer, "id_to_token"):
         return [tokenizer.id_to_token.get(i, str(i)) for i in ids]
     if hasattr(tokenizer, "decode"):
-        return [tokenizer.decode([i])[0] if tokenizer.decode([i]) else str(i) for i in ids]
+        return [
+            tokenizer.decode([i])[0] if tokenizer.decode([i]) else str(i) for i in ids
+        ]
     return [str(i) for i in ids]
 
 
@@ -61,6 +64,7 @@ def _fetch_weights(model, layer: int) -> Optional[torch.Tensor]:
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
+
 
 def plot_attention_heads(
     model,
@@ -97,15 +101,16 @@ def plot_attention_heads(
         )
 
     # weights: (B, n_heads, T, T) — take first item in batch
-    w = weights[0].detach().cpu().float()   # (n_heads, T, T)
+    w = weights[0].detach().cpu().float()  # (n_heads, T, T)
     n_heads, T_q, T_k = w.shape
 
-    tokens = _get_tokens(tokenizer, idx[0])   # length T
+    tokens = _get_tokens(tokenizer, idx[0])  # length T
 
     ncols = min(n_heads, 4)
     nrows = (n_heads + ncols - 1) // ncols
     fig, axes = plt.subplots(
-        nrows, ncols,
+        nrows,
+        ncols,
         figsize=(figsize_per_head[0] * ncols, figsize_per_head[1] * nrows),
         squeeze=False,
     )
@@ -113,7 +118,8 @@ def plot_attention_heads(
     prefix = f"{title_prefix} | " if title_prefix else ""
     fig.suptitle(
         f"{prefix}Layer {layer} — Attention Weights ({n_heads} heads)",
-        fontsize=12, fontweight="bold",
+        fontsize=12,
+        fontweight="bold",
     )
 
     tick_labels = tokens[:T_k]
@@ -174,11 +180,12 @@ def plot_all_layers(
     for layer in range(n_layers):
         weights = _fetch_weights(model, layer)
         if weights is None:
-            continue   # layer has no cached weights — skip silently
+            continue  # layer has no cached weights — skip silently
 
         fig = plot_attention_heads(model, tokenizer, idx, layer=layer, **kwargs)
         if out_dir is not None:
             import os
+
             os.makedirs(out_dir, exist_ok=True)
             path = os.path.join(out_dir, f"attn_layer{layer}.png")
             fig.savefig(path, dpi=150, bbox_inches="tight")

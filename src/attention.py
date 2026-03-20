@@ -16,24 +16,27 @@ K (Key) — what each position is advertising. "What information do I contain?"
 V (Value) — the actual content. "What information do I actually pass along if selected?"
 """
 
-import math
 import functools
+import math
+from typing import Optional, Tuple
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Optional, Tuple
 
-## CONSTANTS
+# CONSTANTS
+# ---------
 ROPE_THETA = 10000.0  # RoPE base frequency (LLaMA / Mistral convention)
 DEFAULT_WINDOW_SIZE = 32  # local attention window for SlidingWindowAttention
 
 
 # Utility: scaled dot-product attention (shared by all variants)
 
+
 def scaled_dot_product_attention(
-    q: torch.Tensor,          # (B, heads, T, head_dim)
-    k: torch.Tensor,          # (B, heads, T, head_dim)
-    v: torch.Tensor,          # (B, heads, T, head_dim)
+    q: torch.Tensor,  # (B, heads, T, head_dim)
+    k: torch.Tensor,  # (B, heads, T, head_dim)
+    v: torch.Tensor,  # (B, heads, T, head_dim)
     mask: Optional[torch.Tensor] = None,  # (T, T) or (B, 1, T, T)
     dropout: float = 0.0,
     training: bool = False,
@@ -61,28 +64,33 @@ def scaled_dot_product_attention(
     out = torch.matmul(attn_weights, v)
     return (out, attn_weights) if return_weights else out
 
-## Causal mask
+
+# Causal mask
+# -----------
 def causal_mask(seq_len: int, device: torch.device) -> torch.Tensor:
     """Upper-triangular mask — prevents position i from attending to j > i."""
     return torch.triu(torch.ones(seq_len, seq_len, device=device), diagonal=1).bool()
 
-######################################################
-#### Variant 1: Vanilla Multi-Head Self-Attention ####
-######################################################
+
+# Variant 1: Vanilla Multi-Head Self-Attention
+# --------------------------------------------
+
 
 class MultiHeadAttention(nn.Module):
     def __init__(self, d_model: int, n_heads: int, dropout: float = 0.1):
         super().__init__()
         assert d_model % n_heads == 0, "d_model must be divisible by n_heads"
 
-        self.d_model  = d_model
-        self.n_heads  = n_heads
+        self.d_model = d_model
+        self.n_heads = n_heads
         self.head_dim = d_model // n_heads
-        self.dropout  = dropout
+        self.dropout = dropout
 
-        self.qkv_proj    = nn.Linear(d_model, 3 * d_model, bias=False)
-        self.out_proj    = nn.Linear(d_model, d_model, bias=False)
-        self.attn_weights: Optional[torch.Tensor] = None  # set during forward; used for visualisation
+        self.qkv_proj = nn.Linear(d_model, 3 * d_model, bias=False)
+        self.out_proj = nn.Linear(d_model, d_model, bias=False)
+        self.attn_weights: Optional[torch.Tensor] = (
+            None  # set during forward; used for visualisation
+        )
 
     def forward(
         self,
@@ -94,8 +102,8 @@ class MultiHeadAttention(nn.Module):
         B, T, C = x.shape
 
         # Project and split into Q, K, V
-        qkv = self.qkv_proj(x)                          # (B, T, 3*d_model)
-        q, k, v = qkv.split(self.d_model, dim=-1)       # each (B, T, d_model)
+        qkv = self.qkv_proj(x)  # (B, T, 3*d_model)
+        q, k, v = qkv.split(self.d_model, dim=-1)  # each (B, T, d_model)
 
         # Reshape to (B, heads, T, head_dim)
         def reshape(t):
@@ -111,7 +119,12 @@ class MultiHeadAttention(nn.Module):
         present = (k, v) if use_cache else None
 
         out, weights = scaled_dot_product_attention(
-            q, k, v, mask=mask, dropout=self.dropout, training=self.training,
+            q,
+            k,
+            v,
+            mask=mask,
+            dropout=self.dropout,
+            training=self.training,
             return_weights=True,
         )
         self.attn_weights = weights.detach()  # (B, heads, T, T)
@@ -121,9 +134,9 @@ class MultiHeadAttention(nn.Module):
         return self.out_proj(out), present
 
 
-##############################
-#### RoPE helper functions ###
-##############################
+# RoPE helper functions
+# ---------------------
+
 
 def precompute_rope_freqs(
     head_dim: int,
@@ -148,7 +161,9 @@ def precompute_rope_freqs(
     """
     assert head_dim % 2 == 0
     # θ_i = 1 / 10000^(2i/head_dim),  shape: (head_dim/2,)
-    freqs = 1.0 / (theta ** (torch.arange(0, head_dim, 2, device=device).float() / head_dim))
+    freqs = 1.0 / (
+        theta ** (torch.arange(0, head_dim, 2, device=device).float() / head_dim)
+    )
     # positions × frequencies,  shape: (max_seq_len, head_dim/2)
     positions = torch.arange(max_seq_len, device=device).float()
     freqs = torch.outer(positions, freqs)
@@ -192,30 +207,34 @@ def apply_rope(
     return x * cos + rotate_half(x) * sin
 
 
-################################################################
-#### Variant 2: Multi-Head Attention with Rotary Embeddings ####
-################################################################
+# Variant 2: Multi-Head Attention with Rotary Embeddings
+# ------------------------------------------------------
+
 
 class RoPEMultiHeadAttention(nn.Module):
     """
     MHA where position is encoded via rotation of Q and K vectors (RoPE).
     """
 
-    def __init__(self, d_model: int, n_heads: int, max_seq_len: int = 512, dropout: float = 0.1):
+    def __init__(
+        self, d_model: int, n_heads: int, max_seq_len: int = 512, dropout: float = 0.1
+    ):
         super().__init__()
         assert d_model % n_heads == 0
 
-        self.d_model  = d_model
-        self.n_heads  = n_heads
+        self.d_model = d_model
+        self.n_heads = n_heads
         self.head_dim = d_model // n_heads
-        self.dropout  = dropout
+        self.dropout = dropout
 
-        self.qkv_proj    = nn.Linear(d_model, 3 * d_model, bias=False)
-        self.out_proj    = nn.Linear(d_model, d_model, bias=False)
+        self.qkv_proj = nn.Linear(d_model, 3 * d_model, bias=False)
+        self.out_proj = nn.Linear(d_model, d_model, bias=False)
         self.attn_weights: Optional[torch.Tensor] = None
 
         # Precompute and register as buffer — moves to GPU automatically with .to(device)
-        cos, sin = precompute_rope_freqs(self.head_dim, max_seq_len, device=torch.device("cpu"))
+        cos, sin = precompute_rope_freqs(
+            self.head_dim, max_seq_len, device=torch.device("cpu")
+        )
         self.register_buffer("rope_cos", cos)
         self.register_buffer("rope_sin", sin)
 
@@ -251,7 +270,12 @@ class RoPEMultiHeadAttention(nn.Module):
         present = (k, v) if use_cache else None
 
         out, weights = scaled_dot_product_attention(
-            q, k, v, mask=mask, dropout=self.dropout, training=self.training,
+            q,
+            k,
+            v,
+            mask=mask,
+            dropout=self.dropout,
+            training=self.training,
             return_weights=True,
         )
         self.attn_weights = weights.detach()
@@ -260,9 +284,9 @@ class RoPEMultiHeadAttention(nn.Module):
         return self.out_proj(out), present
 
 
-##################################################
-#### Variant 3: Grouped Query Attention (GQA) ####
-##################################################
+# Variant 3: Grouped Query Attention (GQA)
+# ----------------------------------------
+
 
 class GroupedQueryAttention(nn.Module):
     """
@@ -286,17 +310,17 @@ class GroupedQueryAttention(nn.Module):
         assert d_model % n_heads == 0
         assert n_heads % kv_heads == 0, "n_heads must be divisible by kv_heads"
 
-        self.d_model  = d_model
-        self.n_heads  = n_heads
+        self.d_model = d_model
+        self.n_heads = n_heads
         self.kv_heads = kv_heads
         self.head_dim = d_model // n_heads
-        self.groups   = n_heads // kv_heads  # how many Q heads share each K/V head
-        self.dropout  = dropout
+        self.groups = n_heads // kv_heads  # how many Q heads share each K/V head
+        self.dropout = dropout
 
-        self.q_proj      = nn.Linear(d_model, d_model, bias=False)
-        self.k_proj      = nn.Linear(d_model, kv_heads * self.head_dim, bias=False)
-        self.v_proj      = nn.Linear(d_model, kv_heads * self.head_dim, bias=False)
-        self.out_proj    = nn.Linear(d_model, d_model, bias=False)
+        self.q_proj = nn.Linear(d_model, d_model, bias=False)
+        self.k_proj = nn.Linear(d_model, kv_heads * self.head_dim, bias=False)
+        self.v_proj = nn.Linear(d_model, kv_heads * self.head_dim, bias=False)
+        self.out_proj = nn.Linear(d_model, d_model, bias=False)
         self.attn_weights: Optional[torch.Tensor] = None
 
     def forward(
@@ -308,7 +332,7 @@ class GroupedQueryAttention(nn.Module):
     ) -> Tuple[torch.Tensor, Optional[Tuple[torch.Tensor, torch.Tensor]]]:
         B, T, C = x.shape
 
-        q = self.q_proj(x).view(B, T, self.n_heads,  self.head_dim).transpose(1, 2)
+        q = self.q_proj(x).view(B, T, self.n_heads, self.head_dim).transpose(1, 2)
         k = self.k_proj(x).view(B, T, self.kv_heads, self.head_dim).transpose(1, 2)
         v = self.v_proj(x).view(B, T, self.kv_heads, self.head_dim).transpose(1, 2)
 
@@ -325,7 +349,12 @@ class GroupedQueryAttention(nn.Module):
         v = v.repeat_interleave(self.groups, dim=1)
 
         out, weights = scaled_dot_product_attention(
-            q, k, v, mask=mask, dropout=self.dropout, training=self.training,
+            q,
+            k,
+            v,
+            mask=mask,
+            dropout=self.dropout,
+            training=self.training,
             return_weights=True,
         )
         self.attn_weights = weights.detach()
@@ -334,9 +363,9 @@ class GroupedQueryAttention(nn.Module):
         return self.out_proj(out), present
 
 
-######################################################
-#### Variant 4: Sparse / Sliding-Window Attention ####
-######################################################
+# Variant 4: Sparse / Sliding-Window Attention
+# --------------------------------------------
+
 
 class SlidingWindowAttention(nn.Module):
     """
@@ -345,18 +374,24 @@ class SlidingWindowAttention(nn.Module):
     Reduces complexity from O(T^2) to O(T * window_size).
     """
 
-    def __init__(self, d_model: int, n_heads: int, window_size: int = DEFAULT_WINDOW_SIZE, dropout: float = 0.1):
+    def __init__(
+        self,
+        d_model: int,
+        n_heads: int,
+        window_size: int = DEFAULT_WINDOW_SIZE,
+        dropout: float = 0.1,
+    ):
         super().__init__()
         assert d_model % n_heads == 0
 
-        self.d_model     = d_model
-        self.n_heads     = n_heads
-        self.head_dim    = d_model // n_heads
+        self.d_model = d_model
+        self.n_heads = n_heads
+        self.head_dim = d_model // n_heads
         self.window_size = window_size
-        self.dropout     = dropout
+        self.dropout = dropout
 
-        self.qkv_proj    = nn.Linear(d_model, 3 * d_model, bias=False)
-        self.out_proj    = nn.Linear(d_model, d_model, bias=False)
+        self.qkv_proj = nn.Linear(d_model, 3 * d_model, bias=False)
+        self.out_proj = nn.Linear(d_model, d_model, bias=False)
         self.attn_weights: Optional[torch.Tensor] = None
 
     @functools.lru_cache(maxsize=8)
@@ -413,11 +448,15 @@ class SlidingWindowAttention(nn.Module):
         present = (k, v) if use_cache else None
 
         out, weights = scaled_dot_product_attention(
-            q, k, v, mask=sparse_mask, dropout=self.dropout, training=self.training,
+            q,
+            k,
+            v,
+            mask=sparse_mask,
+            dropout=self.dropout,
+            training=self.training,
             return_weights=True,
         )
         self.attn_weights = weights.detach()
 
         out = out.transpose(1, 2).contiguous().view(B, T, C)
         return self.out_proj(out), present
-

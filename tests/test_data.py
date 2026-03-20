@@ -10,23 +10,13 @@ Covers:
     tensor dtypes
 """
 
-import pytest
 import torch
 
-from pgn_data import (
-    parse_pgn,
-    ChessTokenizer,
-    ChessDataset,
-    PAD_TOKEN,
-    BOS_TOKEN,
-    EOS_TOKEN,
-    UNK_TOKEN,
-    SPECIAL_TOKENS,
-)
+from pgn_data import (BOS_TOKEN, EOS_TOKEN, PAD_TOKEN, SPECIAL_TOKENS,
+                      UNK_TOKEN, ChessDataset, ChessTokenizer, parse_pgn)
 
-# ---------------------------------------------------------------------------
 # Fixtures
-# ---------------------------------------------------------------------------
+# --------
 
 SAMPLE_PGN = """\
 [Event "Test Game 1"]
@@ -67,9 +57,9 @@ ANNOTATED_PGN = """\
 """
 
 
-# ---------------------------------------------------------------------------
 # parse_pgn
-# ---------------------------------------------------------------------------
+# ---------
+
 
 class TestParsePGN:
     def test_parses_correct_number_of_games(self):
@@ -86,21 +76,24 @@ class TestParsePGN:
         games = parse_pgn(SAMPLE_PGN)
         for game in games:
             for move in game:
-                assert move not in ("1-0", "0-1", "1/2-1/2", "*"), (
-                    f"Result token '{move}' should be stripped from moves"
-                )
+                assert move not in (
+                    "1-0",
+                    "0-1",
+                    "1/2-1/2",
+                    "*",
+                ), f"Result token '{move}' should be stripped from moves"
 
     def test_move_numbers_stripped(self):
         games = parse_pgn(SAMPLE_PGN)
         for game in games:
             for move in game:
-                assert not any(c.isdigit() and move.endswith('.') for c in move), (
-                    f"Move number token '{move}' should be stripped"
-                )
+                assert not any(
+                    c.isdigit() and move.endswith(".") for c in move
+                ), f"Move number token '{move}' should be stripped"
                 # Move numbers look like "1.", "2.", "10." — digits followed by a dot
-                assert not (move[:-1].isdigit() and move.endswith('.')), (
-                    f"Move number '{move}' should be stripped"
-                )
+                assert not (
+                    move[:-1].isdigit() and move.endswith(".")
+                ), f"Move number '{move}' should be stripped"
 
     def test_expected_moves_present_in_first_game(self):
         games = parse_pgn(SAMPLE_PGN)
@@ -122,14 +115,14 @@ class TestParsePGN:
         games = parse_pgn(ANNOTATED_PGN)
         assert len(games) == 1
         for move in games[0]:
-            assert not move.startswith('{')
-            assert not move.startswith('$')
-            assert not move.startswith('(')
+            assert not move.startswith("{")
+            assert not move.startswith("$")
+            assert not move.startswith("(")
 
 
-# ---------------------------------------------------------------------------
 # ChessTokenizer
-# ---------------------------------------------------------------------------
+# --------------
+
 
 class TestChessTokenizer:
     def test_special_token_ids_are_fixed(self):
@@ -143,7 +136,7 @@ class TestChessTokenizer:
         tok = ChessTokenizer()
         tok.build_from_games([["e4", "e5"]])
         ids = tok.encode(["e4", "e5"])
-        assert ids[0] == tok.bos_id,  "First token must be BOS"
+        assert ids[0] == tok.bos_id, "First token must be BOS"
         assert ids[-1] == tok.eos_id, "Last token must be EOS"
 
     def test_encode_without_special_tokens(self):
@@ -155,10 +148,10 @@ class TestChessTokenizer:
         assert ids[-1] != tok.eos_id
 
     def test_decode_roundtrip(self):
-        tok   = ChessTokenizer()
+        tok = ChessTokenizer()
         moves = ["e4", "e5", "Nf3", "Nc6"]
         tok.build_from_games([moves])
-        ids     = tok.encode(moves, add_special=False)
+        ids = tok.encode(moves, add_special=False)
         decoded = tok.decode(ids)
         assert decoded == moves
 
@@ -189,7 +182,7 @@ class TestChessTokenizer:
         tok.save(path)
         tok2 = ChessTokenizer.load(path)
         assert tok2.token2id == tok.token2id
-        assert tok2.id2token  == tok.id2token
+        assert tok2.id2token == tok.id2token
 
     def test_properties_return_correct_ids(self):
         tok = ChessTokenizer()
@@ -198,13 +191,13 @@ class TestChessTokenizer:
         assert tok.eos_id == tok.token2id[EOS_TOKEN]
 
 
-# ---------------------------------------------------------------------------
 # ChessDataset
-# ---------------------------------------------------------------------------
+# ------------
+
 
 def _make_dataset(seq_len: int = 16) -> ChessDataset:
-    tok       = ChessTokenizer()
-    moves     = ["e4", "e5", "Nf3", "Nc6", "Bb5", "a6", "Ba4", "Nf6", "O-O", "Be7"]
+    tok = ChessTokenizer()
+    moves = ["e4", "e5", "Nf3", "Nc6", "Bb5", "a6", "Ba4", "Nf6", "O-O", "Be7"]
     games_raw = [moves for _ in range(5)]
     tok.build_from_games(games_raw)
     encoded = [tok.encode(g) for g in games_raw]
@@ -226,12 +219,12 @@ class TestChessDataset:
         For non-padded positions: tgt[i] == inp[i+1].
         This is the defining property of autoregressive LM data.
         """
-        tok   = ChessTokenizer()
+        tok = ChessTokenizer()
         moves = ["e4", "e5", "Nf3", "Nc6", "Bb5", "a6", "Ba4", "Nf6", "O-O", "Be7"]
         tok.build_from_games([moves])
-        encoded = [tok.encode(moves)]                  # BOS + 10 moves + EOS = 12 tokens
-        seq_len = len(encoded[0]) - 1                  # 11
-        ds      = ChessDataset(encoded, seq_len=seq_len, pad_id=tok.pad_id)
+        encoded = [tok.encode(moves)]  # BOS + 10 moves + EOS = 12 tokens
+        seq_len = len(encoded[0]) - 1  # 11
+        ds = ChessDataset(encoded, seq_len=seq_len, pad_id=tok.pad_id)
         inp, tgt = ds[0]
 
         for i in range(len(inp) - 1):
@@ -247,18 +240,18 @@ class TestChessDataset:
         When a game is shorter than seq_len, padding positions in targets must
         be -1 so cross_entropy ignores them.
         """
-        ds = _make_dataset(seq_len=64)  # longer than any game → forces padding
+        ds = _make_dataset(seq_len=64)  # longer than any game = forces padding
         found_padding = False
         for i in range(len(ds)):
             inp, tgt = ds[i]
             if (inp == 0).any():
-                assert (tgt == -1).any(), (
-                    "Padded input positions must have target == -1"
-                )
+                assert (
+                    tgt == -1
+                ).any(), "Padded input positions must have target == -1"
                 found_padding = True
                 break
-        # If no padding was created the test is vacuously true — warn but don't fail
-        # (This can happen if games are longer than seq_len; increase seq_len if so)
+        # If no padding was created the test is vacuously true
+        # = warn but don't fail
 
     def test_tensor_dtypes(self):
         ds = _make_dataset()
@@ -274,7 +267,7 @@ class TestChessDataset:
 
     def test_target_values_are_valid_ids_or_minus_one(self):
         """Target ids must be vocab indices or -1 (padding ignore index)."""
-        tok   = ChessTokenizer()
+        tok = ChessTokenizer()
         moves = ["e4", "e5", "Nf3", "Nc6", "Bb5", "a6"]
         tok.build_from_games([moves])
         encoded = [tok.encode(moves)]
@@ -283,6 +276,6 @@ class TestChessDataset:
             _, tgt = ds[i]
             valid = (tgt >= 0) & (tgt < tok.vocab_size)
             ignored = tgt == -1
-            assert (valid | ignored).all(), (
-                "Every target must be a valid vocab id or -1 (padding)"
-            )
+            assert (
+                valid | ignored
+            ).all(), "Every target must be a valid vocab id or -1 (padding)"

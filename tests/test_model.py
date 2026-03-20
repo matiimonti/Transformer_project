@@ -15,16 +15,15 @@ Covers:
 
 import pytest
 import torch
-import torch.nn as nn
 
-from model import ChessTransformer, FeedForward, TransformerBlock
 from attention import MultiHeadAttention, RoPEMultiHeadAttention
+from model import ChessTransformer, FeedForward
 
-D_MODEL    = 32
-N_HEADS    = 4
+D_MODEL = 32
+N_HEADS = 4
 VOCAB_SIZE = 50
-SEQ_LEN    = 16
-B          = 2
+SEQ_LEN = 16
+B = 2
 
 
 def make_model(use_sinusoidal_pe: bool = True, n_layers: int = 2) -> ChessTransformer:
@@ -40,9 +39,9 @@ def make_model(use_sinusoidal_pe: bool = True, n_layers: int = 2) -> ChessTransf
     ).eval()
 
 
-# ---------------------------------------------------------------------------
 # Forward pass
-# ---------------------------------------------------------------------------
+# ------------
+
 
 class TestForwardPass:
     def test_logits_shape(self):
@@ -56,7 +55,7 @@ class TestForwardPass:
 
     def test_loss_is_scalar_when_targets_given(self):
         model = make_model()
-        idx     = torch.randint(0, VOCAB_SIZE, (B, SEQ_LEN))
+        idx = torch.randint(0, VOCAB_SIZE, (B, SEQ_LEN))
         targets = torch.randint(0, VOCAB_SIZE, (B, SEQ_LEN))
         with torch.no_grad():
             _, loss, _ = model(idx, targets=targets)
@@ -70,10 +69,10 @@ class TestForwardPass:
         return NaN or raise — not silently return 0.  Mixed targets must
         produce a valid positive loss.
         """
-        model   = make_model()
-        idx     = torch.randint(0, VOCAB_SIZE, (B, SEQ_LEN))
+        model = make_model()
+        idx = torch.randint(0, VOCAB_SIZE, (B, SEQ_LEN))
         targets = torch.full((B, SEQ_LEN), -1, dtype=torch.long)
-        targets[:, :SEQ_LEN // 2] = torch.randint(0, VOCAB_SIZE, (B, SEQ_LEN // 2))
+        targets[:, : SEQ_LEN // 2] = torch.randint(0, VOCAB_SIZE, (B, SEQ_LEN // 2))
         with torch.no_grad():
             _, loss, _ = model(idx, targets=targets)
         assert loss is not None and loss.item() > 0
@@ -85,19 +84,22 @@ class TestForwardPass:
             model(idx)
 
 
-# ---------------------------------------------------------------------------
 # Weight tying
-# ---------------------------------------------------------------------------
+# ------------
+
 
 class TestWeightTying:
     def test_head_shares_embedding_weights(self):
         model = make_model()
-        assert model.head.weight is model.token_emb.weight, (
-            "Output projection and token embedding must be the same object (weight tying)"
-        )
+        assert (
+            model.head.weight is model.token_emb.weight
+        ), "Output projection and token embedding must be the same object"
 
     def test_gradient_flows_through_both(self):
-        """A gradient step on the loss should update shared weights once, not twice."""
+        """
+        A gradient step on the loss should
+        update shared weights once, not twice.
+        """
         factory = lambda: MultiHeadAttention(d_model=D_MODEL, n_heads=N_HEADS)
         model = ChessTransformer(
             vocab_size=VOCAB_SIZE,
@@ -108,7 +110,7 @@ class TestWeightTying:
             max_seq_len=SEQ_LEN,
         ).train()
 
-        idx     = torch.randint(0, VOCAB_SIZE, (B, SEQ_LEN))
+        idx = torch.randint(0, VOCAB_SIZE, (B, SEQ_LEN))
         targets = torch.randint(0, VOCAB_SIZE, (B, SEQ_LEN))
         _, loss, _ = model(idx, targets=targets)
         loss.backward()
@@ -116,24 +118,25 @@ class TestWeightTying:
         assert model.token_emb.weight.grad is not None
 
 
-# ---------------------------------------------------------------------------
 # Autoregressive generation
-# ---------------------------------------------------------------------------
+# -------------------------
+
 
 class TestGenerate:
     def test_output_length(self):
-        model   = make_model()
-        seed    = torch.zeros(1, 1, dtype=torch.long)
-        n_new   = 8
+        model = make_model()
+        seed = torch.zeros(1, 1, dtype=torch.long)
+        n_new = 8
         with torch.no_grad():
             out = model.generate(seed, max_new_tokens=n_new)
-        assert out.shape == (1, 1 + n_new), (
-            f"Expected shape (1, {1 + n_new}), got {out.shape}"
-        )
+        assert out.shape == (
+            1,
+            1 + n_new,
+        ), f"Expected shape (1, {1 + n_new}), got {out.shape}"
 
     def test_generated_tokens_in_vocab(self):
         model = make_model()
-        seed  = torch.zeros(1, 1, dtype=torch.long)
+        seed = torch.zeros(1, 1, dtype=torch.long)
         # max_new_tokens kept < SEQ_LEN so the PE table is never exceeded
         with torch.no_grad():
             out = model.generate(seed, max_new_tokens=10)
@@ -141,9 +144,12 @@ class TestGenerate:
         assert out.min().item() >= 0
 
     def test_greedy_is_deterministic(self):
-        """top_k=1, very low temperature ≈ greedy: two runs must match exactly."""
+        """
+        top_k=1, very low temperature ≈ greedy:
+        two runs must match exactly.
+        """
         model = make_model()
-        seed  = torch.zeros(1, 1, dtype=torch.long)
+        seed = torch.zeros(1, 1, dtype=torch.long)
         with torch.no_grad():
             out1 = model.generate(seed, max_new_tokens=10, temperature=1e-6, top_k=1)
             out2 = model.generate(seed, max_new_tokens=10, temperature=1e-6, top_k=1)
@@ -152,13 +158,16 @@ class TestGenerate:
     def test_seed_tokens_preserved(self):
         """The seed tokens must appear unchanged at the start of the output."""
         model = make_model()
-        seed  = torch.tensor([[3, 7, 11]], dtype=torch.long)
+        seed = torch.tensor([[3, 7, 11]], dtype=torch.long)
         with torch.no_grad():
             out = model.generate(seed, max_new_tokens=5)
         assert torch.equal(out[:, :3], seed), "Seed tokens must be preserved in output"
 
     def test_restores_training_mode(self):
-        """generate() must restore .training=True if the model was in train mode."""
+        """
+        generate() must restore .training=True
+        if the model was in train mode.
+        """
         model = make_model()
         model.train()
         seed = torch.zeros(1, 1, dtype=torch.long)
@@ -168,15 +177,17 @@ class TestGenerate:
 
     def test_stays_eval_if_was_eval(self):
         model = make_model()  # already eval from make_model()
-        seed  = torch.zeros(1, 1, dtype=torch.long)
+        seed = torch.zeros(1, 1, dtype=torch.long)
         with torch.no_grad():
             model.generate(seed, max_new_tokens=5)
-        assert not model.training, "generate() must not switch to train mode if model was eval"
+        assert (
+            not model.training
+        ), "generate() must not switch to train mode if model was eval"
 
 
-# ---------------------------------------------------------------------------
 # RoPE model (sinusoidal PE disabled)
-# ---------------------------------------------------------------------------
+# -----------------------------------
+
 
 class TestRoPEModel:
     def test_forward_pass(self):
@@ -198,14 +209,14 @@ class TestRoPEModel:
         assert logits.shape == (B, SEQ_LEN, VOCAB_SIZE)
 
 
-# ---------------------------------------------------------------------------
 # FeedForward
-# ---------------------------------------------------------------------------
+# -----------
+
 
 class TestFeedForward:
     def test_output_shape(self):
         ffn = FeedForward(D_MODEL).eval()
-        x   = torch.randn(B, SEQ_LEN, D_MODEL)
+        x = torch.randn(B, SEQ_LEN, D_MODEL)
         with torch.no_grad():
             out = ffn(x)
         assert out.shape == x.shape
@@ -220,15 +231,15 @@ class TestFeedForward:
     def test_output_is_not_input(self):
         """FFN must transform the input, not return it unchanged."""
         ffn = FeedForward(D_MODEL).eval()
-        x   = torch.randn(B, SEQ_LEN, D_MODEL)
+        x = torch.randn(B, SEQ_LEN, D_MODEL)
         with torch.no_grad():
             out = ffn(x)
         assert not torch.allclose(out, x), "FFN output should differ from its input"
 
 
-# ---------------------------------------------------------------------------
 # Parameter counting
-# ---------------------------------------------------------------------------
+# ------------------
+
 
 class TestParameterCount:
     def test_count_parameters_positive(self):
@@ -241,9 +252,9 @@ class TestParameterCount:
         assert large.count_parameters() > small.count_parameters()
 
 
-# ---------------------------------------------------------------------------
 # KV cache
-# ---------------------------------------------------------------------------
+# --------
+
 
 class TestKVCache:
     """
@@ -253,7 +264,7 @@ class TestKVCache:
 
     def test_forward_returns_cache_when_requested(self):
         model = make_model()
-        idx   = torch.randint(0, VOCAB_SIZE, (1, 8))
+        idx = torch.randint(0, VOCAB_SIZE, (1, 8))
         with torch.no_grad():
             logits, _, cache = model(idx, use_cache=True)
         assert cache is not None
@@ -266,7 +277,7 @@ class TestKVCache:
 
     def test_forward_returns_no_cache_by_default(self):
         model = make_model()
-        idx   = torch.randint(0, VOCAB_SIZE, (1, 8))
+        idx = torch.randint(0, VOCAB_SIZE, (1, 8))
         with torch.no_grad():
             _, _, cache = model(idx)
         assert cache is None
@@ -278,13 +289,17 @@ class TestKVCache:
         """
         torch.manual_seed(42)
         model = make_model()
-        seed  = torch.zeros(1, 1, dtype=torch.long)
+        seed = torch.zeros(1, 1, dtype=torch.long)
         with torch.no_grad():
-            out_cached   = model.generate(seed, max_new_tokens=8, temperature=1e-6, top_k=1, use_cache=True)
-            out_uncached = model.generate(seed, max_new_tokens=8, temperature=1e-6, top_k=1, use_cache=False)
-        assert torch.equal(out_cached, out_uncached), (
-            "KV-cached and uncached generation must agree on greedy output"
-        )
+            out_cached = model.generate(
+                seed, max_new_tokens=8, temperature=1e-6, top_k=1, use_cache=True
+            )
+            out_uncached = model.generate(
+                seed, max_new_tokens=8, temperature=1e-6, top_k=1, use_cache=False
+            )
+        assert torch.equal(
+            out_cached, out_uncached
+        ), "KV-cached and uncached generation must agree on greedy output"
 
     def test_decode_step_processes_single_token(self):
         """
@@ -292,7 +307,7 @@ class TestKVCache:
         model (T=1) — confirmed by verifying the cache grows by 1 per step.
         """
         model = make_model()
-        idx   = torch.zeros(1, 4, dtype=torch.long)
+        idx = torch.zeros(1, 4, dtype=torch.long)
         with torch.no_grad():
             _, _, cache = model(idx, use_cache=True)  # prefill
         T_after_prefill = cache[0][0].size(2)
@@ -301,4 +316,4 @@ class TestKVCache:
         # One decode step
         with torch.no_grad():
             _, _, cache2 = model(idx[:, -1:], past_key_values=cache, use_cache=True)
-        assert cache2[0][0].size(2) == 5, "Cache must grow by 1 per decode step"
+        assert cache2[0][0].size(2) == 5, "Cache must grow by 1 per decode stp"

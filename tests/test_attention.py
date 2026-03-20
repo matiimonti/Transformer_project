@@ -11,26 +11,18 @@ Covers:
   - Scaled dot-product attention basics
 """
 
-import math
 import pytest
 import torch
 
-from attention import (
-    MultiHeadAttention,
-    RoPEMultiHeadAttention,
-    GroupedQueryAttention,
-    SlidingWindowAttention,
-    causal_mask,
-    apply_rope,
-    precompute_rope_freqs,
-    rotate_half,
-    scaled_dot_product_attention,
-)
+from attention import (GroupedQueryAttention, MultiHeadAttention,
+                       RoPEMultiHeadAttention, SlidingWindowAttention,
+                       apply_rope, causal_mask, precompute_rope_freqs,
+                       rotate_half, scaled_dot_product_attention)
 
 # Small dimensions so tests run fast on CPU
-D_MODEL  = 32
-N_HEADS  = 4
-B, T     = 2, 16
+D_MODEL = 32
+N_HEADS = 4
+B, T = 2, 16
 HEAD_DIM = D_MODEL // N_HEADS
 
 
@@ -40,9 +32,9 @@ def x():
     return torch.randn(B, T, D_MODEL)
 
 
-# ---------------------------------------------------------------------------
 # Causal mask
-# ---------------------------------------------------------------------------
+# -----------
+
 
 class TestCausalMask:
     def test_shape(self):
@@ -53,7 +45,9 @@ class TestCausalMask:
         mask = causal_mask(T, torch.device("cpu"))
         for i in range(T):
             for j in range(i + 1):
-                assert not mask[i, j], f"Position ({i},{j}) should be unmasked (past/present)"
+                assert not mask[
+                    i, j
+                ], f"Position ({i},{j}) should be unmasked (past/present)"
 
     def test_upper_triangle_masked(self):
         mask = causal_mask(T, torch.device("cpu"))
@@ -66,9 +60,9 @@ class TestCausalMask:
         assert not mask.diagonal().any(), "A token must be able to attend to itself"
 
 
-# ---------------------------------------------------------------------------
 # No future token leakage (causality test for all variants)
-# ---------------------------------------------------------------------------
+# ---------------------------------------------------------
+
 
 class TestNoFutureLeakage:
     """
@@ -85,12 +79,12 @@ class TestNoFutureLeakage:
         x2[:, T // 2 :] = x2[:, T // 2 :] + 100.0  # large perturbation
 
         with torch.no_grad():
-            out1, _ = module(x,  mask=mask)
+            out1, _ = module(x, mask=mask)
             out2, _ = module(x2, mask=mask)
 
-        assert torch.allclose(out1[:, : T // 2], out2[:, : T // 2], atol=1e-5), (
-            f"{type(module).__name__}: future tokens leaked into past positions"
-        )
+        assert torch.allclose(
+            out1[:, : T // 2], out2[:, : T // 2], atol=1e-5
+        ), f"{type(module).__name__}: future tokens leaked into past positions"
 
     def test_vanilla_causal(self, x):
         self._check_causal(MultiHeadAttention(D_MODEL, N_HEADS).eval(), x)
@@ -111,30 +105,44 @@ class TestNoFutureLeakage:
         )
 
 
-# ---------------------------------------------------------------------------
 # Output shapes
-# ---------------------------------------------------------------------------
+# -------------
+
 
 class TestOutputShapes:
-    @pytest.mark.parametrize("module_cls,kwargs", [
-        (MultiHeadAttention,      {"d_model": D_MODEL, "n_heads": N_HEADS}),
-        (RoPEMultiHeadAttention,  {"d_model": D_MODEL, "n_heads": N_HEADS, "max_seq_len": T}),
-        (GroupedQueryAttention,   {"d_model": D_MODEL, "n_heads": N_HEADS, "kv_heads": 2}),
-        (SlidingWindowAttention,  {"d_model": D_MODEL, "n_heads": N_HEADS, "window_size": 4}),
-    ])
+    @pytest.mark.parametrize(
+        "module_cls,kwargs",
+        [
+            (MultiHeadAttention, {"d_model": D_MODEL, "n_heads": N_HEADS}),
+            (
+                RoPEMultiHeadAttention,
+                {"d_model": D_MODEL, "n_heads": N_HEADS, "max_seq_len": T},
+            ),
+            (
+                GroupedQueryAttention,
+                {"d_model": D_MODEL, "n_heads": N_HEADS, "kv_heads": 2},
+            ),
+            (
+                SlidingWindowAttention,
+                {"d_model": D_MODEL, "n_heads": N_HEADS, "window_size": 4},
+            ),
+        ],
+    )
     def test_output_shape(self, x, module_cls, kwargs):
         module = module_cls(**kwargs).eval()
         with torch.no_grad():
             out, cache = module(x)
-        assert out.shape == (B, T, D_MODEL), (
-            f"{module_cls.__name__}: expected {(B, T, D_MODEL)}, got {out.shape}"
-        )
+        assert out.shape == (
+            B,
+            T,
+            D_MODEL,
+        ), f"{module_cls.__name__}: expected {(B, T, D_MODEL)}, got {out.shape}"
         assert cache is None  # use_cache=False by default
 
 
-# ---------------------------------------------------------------------------
 # RoPE
-# ---------------------------------------------------------------------------
+# ----
+
 
 class TestRoPE:
     def test_apply_rope_preserves_norm(self):
@@ -143,9 +151,9 @@ class TestRoPE:
         torch.manual_seed(1)
         x = torch.randn(B, N_HEADS, T, HEAD_DIM)
         rotated = apply_rope(x, cos, sin)
-        assert torch.allclose(x.norm(dim=-1), rotated.norm(dim=-1), atol=1e-5), (
-            "RoPE changed vector norms — rotation must be norm-preserving"
-        )
+        assert torch.allclose(
+            x.norm(dim=-1), rotated.norm(dim=-1), atol=1e-5
+        ), "RoPE changed vector norms — rotation must be norm-preserving"
 
     def test_rotate_half_shape(self):
         x = torch.randn(B, N_HEADS, T, HEAD_DIM)
@@ -169,19 +177,19 @@ class TestRoPE:
         assert sin.abs().max().item() <= 1.0 + 1e-6
 
 
-# ---------------------------------------------------------------------------
 # Grouped Query Attention
-# ---------------------------------------------------------------------------
+# -----------------------
+
 
 class TestGQA:
     def test_fewer_params_than_vanilla(self, x):
         vanilla = MultiHeadAttention(D_MODEL, N_HEADS)
-        gqa     = GroupedQueryAttention(D_MODEL, N_HEADS, kv_heads=2)
+        gqa = GroupedQueryAttention(D_MODEL, N_HEADS, kv_heads=2)
         vanilla_n = sum(p.numel() for p in vanilla.parameters())
-        gqa_n     = sum(p.numel() for p in gqa.parameters())
-        assert gqa_n < vanilla_n, (
-            f"GQA ({gqa_n}) should have fewer params than vanilla MHA ({vanilla_n})"
-        )
+        gqa_n = sum(p.numel() for p in gqa.parameters())
+        assert (
+            gqa_n < vanilla_n
+        ), f"GQA ({gqa_n}) should have fewer params than vanilla MHA ({vanilla_n})"
 
     def test_mqa_extreme_case(self, x):
         """kv_heads=1 is Multi-Query Attention — must still produce correct shape."""
@@ -198,9 +206,9 @@ class TestGQA:
         assert out.shape == (B, T, D_MODEL)
 
 
-# ---------------------------------------------------------------------------
 # Sliding Window Attention
-# ---------------------------------------------------------------------------
+# ------------------------
+
 
 class TestSlidingWindow:
     WINDOW = 4
@@ -224,9 +232,11 @@ class TestSlidingWindow:
 
     def test_mask_is_still_causal(self):
         """Every future position that causal masking blocks must also be in the window mask."""
-        mask  = self._mask()
+        mask = self._mask()
         causal = causal_mask(self.T_TEST, torch.device("cpu"))
-        assert mask[causal].all(), (
+        assert mask[
+            causal
+        ].all(), (
             "Sliding window mask must block at least all causally-blocked positions"
         )
 
@@ -236,9 +246,9 @@ class TestSlidingWindow:
         assert not mask.diagonal().any(), "Diagonal must be unmasked (self-attention)"
 
 
-# ---------------------------------------------------------------------------
 # Scaled dot-product attention (shared utility)
-# ---------------------------------------------------------------------------
+# ---------------------------------------------
+
 
 class TestScaledDotProduct:
     def test_output_shape(self):
@@ -269,14 +279,14 @@ class TestScaledDotProduct:
         # with proper scaling the output should differ from a uniform average of v.
         out = scaled_dot_product_attention(q, k, v)
         uniform = v.mean(dim=2, keepdim=True).expand_as(out)
-        assert not torch.allclose(out, uniform, atol=1e-3), (
-            "Output should not be uniform — scaling may be broken"
-        )
+        assert not torch.allclose(
+            out, uniform, atol=1e-3
+        ), "Output should not be uniform — scaling may be broken"
 
 
-# ---------------------------------------------------------------------------
 # KV cache
-# ---------------------------------------------------------------------------
+# --------
+
 
 class TestKVCache:
     """
@@ -284,14 +294,23 @@ class TestKVCache:
     and that cached tensors have the expected shapes.
     """
 
-    T_PROMPT = 8   # tokens in the prompt (prefill)
-    T_NEW    = 4   # tokens generated after prefill (decode steps)
+    T_PROMPT = 8  # tokens in the prompt (prefill)
+    T_NEW = 4  # tokens generated after prefill (decode steps)
 
-    @pytest.mark.parametrize("module_cls,kwargs", [
-        (MultiHeadAttention,     {"d_model": D_MODEL, "n_heads": N_HEADS}),
-        (RoPEMultiHeadAttention, {"d_model": D_MODEL, "n_heads": N_HEADS, "max_seq_len": T}),
-        (GroupedQueryAttention,  {"d_model": D_MODEL, "n_heads": N_HEADS, "kv_heads": 2}),
-    ])
+    @pytest.mark.parametrize(
+        "module_cls,kwargs",
+        [
+            (MultiHeadAttention, {"d_model": D_MODEL, "n_heads": N_HEADS}),
+            (
+                RoPEMultiHeadAttention,
+                {"d_model": D_MODEL, "n_heads": N_HEADS, "max_seq_len": T},
+            ),
+            (
+                GroupedQueryAttention,
+                {"d_model": D_MODEL, "n_heads": N_HEADS, "kv_heads": 2},
+            ),
+        ],
+    )
     def test_cache_returned_when_use_cache_true(self, module_cls, kwargs):
         module = module_cls(**kwargs).eval()
         x = torch.randn(1, self.T_PROMPT, D_MODEL)
@@ -302,23 +321,32 @@ class TestKVCache:
         assert k_cache.shape[2] == self.T_PROMPT  # T dimension of cache
         assert v_cache.shape[2] == self.T_PROMPT
 
-    @pytest.mark.parametrize("module_cls,kwargs", [
-        (MultiHeadAttention,     {"d_model": D_MODEL, "n_heads": N_HEADS}),
-        (RoPEMultiHeadAttention, {"d_model": D_MODEL, "n_heads": N_HEADS, "max_seq_len": T}),
-        (GroupedQueryAttention,  {"d_model": D_MODEL, "n_heads": N_HEADS, "kv_heads": 2}),
-    ])
+    @pytest.mark.parametrize(
+        "module_cls,kwargs",
+        [
+            (MultiHeadAttention, {"d_model": D_MODEL, "n_heads": N_HEADS}),
+            (
+                RoPEMultiHeadAttention,
+                {"d_model": D_MODEL, "n_heads": N_HEADS, "max_seq_len": T},
+            ),
+            (
+                GroupedQueryAttention,
+                {"d_model": D_MODEL, "n_heads": N_HEADS, "kv_heads": 2},
+            ),
+        ],
+    )
     def test_cache_grows_by_one_per_decode_step(self, module_cls, kwargs):
         module = module_cls(**kwargs).eval()
         x_prompt = torch.randn(1, self.T_PROMPT, D_MODEL)
-        x_new    = torch.randn(1, 1, D_MODEL)
+        x_new = torch.randn(1, 1, D_MODEL)
 
         with torch.no_grad():
             _, cache = module(x_prompt, use_cache=True)
             _, cache2 = module(x_new, past_kv=cache, use_cache=True)
 
-        assert cache2[0].size(2) == self.T_PROMPT + 1, (
-            "Cache should grow by 1 after each decode step"
-        )
+        assert (
+            cache2[0].size(2) == self.T_PROMPT + 1
+        ), "Cache should grow by 1 after each decode step"
 
     def test_gqa_cache_uses_kv_heads_not_n_heads(self):
         """GQA KV cache is stored at kv_heads dimension — the memory saving."""
@@ -328,9 +356,9 @@ class TestKVCache:
         with torch.no_grad():
             _, cache = gqa(x, use_cache=True)
         k_cache, v_cache = cache
-        assert k_cache.shape[1] == kv_heads, (
-            f"GQA cache should have {kv_heads} heads, got {k_cache.shape[1]}"
-        )
+        assert (
+            k_cache.shape[1] == kv_heads
+        ), f"GQA cache should have {kv_heads} heads, got {k_cache.shape[1]}"
 
     def test_sliding_window_cache_bounded(self):
         """
@@ -340,10 +368,10 @@ class TestKVCache:
         """
         window = 4
         swa = SlidingWindowAttention(D_MODEL, N_HEADS, window_size=window).eval()
-        x_prefill = torch.randn(1, window + 3, D_MODEL)   # 7 tokens
-        x_new     = torch.randn(1, 1, D_MODEL)             # 1 new decode token
+        x_prefill = torch.randn(1, window + 3, D_MODEL)  # 7 tokens
+        x_new = torch.randn(1, 1, D_MODEL)  # 1 new decode token
         with torch.no_grad():
-            _, cache  = swa(x_prefill, use_cache=True)            # prefill → 7 cached
+            _, cache = swa(x_prefill, use_cache=True)  # prefill → 7 cached
             _, cache2 = swa(x_new, past_kv=cache, use_cache=True)  # decode → evicts old
         assert cache2[0].size(2) <= window, (
             f"SlidingWindowAttention cache must be ≤ window_size ({window}) "

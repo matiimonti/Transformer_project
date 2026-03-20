@@ -10,27 +10,32 @@ All architectural choices are explicit and documented.
 """
 
 import math
+from typing import Callable, List, Optional, Tuple
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Callable, List, Optional, Tuple
 
 from attention import causal_mask
 
-## CONSTANTS
+# CONSTANTS
+# ---------
 DEFAULT_FFN_EXPANSION = 4  # FFN hidden dim = d_model * this (standard GPT-style)
 DEFAULT_MAX_SEQ_LEN = 256  # default maximum sequence length for ChessTransformer
 EMBEDDING_INIT_STD = 0.02  # GPT-2 style embedding weight initialisation std
 
-##############################
-#### Feed-Forward Network ####
-##############################
+# Feed-Forward Network
+# --------------------
+
 
 class FeedForward(nn.Module):
     """
     Two linear layers with GELU activation
     """
-    def __init__(self, d_model: int, expansion: int = DEFAULT_FFN_EXPANSION, dropout: float = 0.1):
+
+    def __init__(
+        self, d_model: int, expansion: int = DEFAULT_FFN_EXPANSION, dropout: float = 0.1
+    ):
         super().__init__()
         d_ff = d_model * expansion
         self.net = nn.Sequential(
@@ -45,14 +50,15 @@ class FeedForward(nn.Module):
         return self.net(x)
 
 
-###########################
-#### Transformer Block ####
-###########################
+# Transformer Block
+# -----------------
+
 
 class TransformerBlock(nn.Module):
     """
     Pre-LN transformer block: normalize before attention and FFN.
     """
+
     def __init__(self, d_model: int, attention: nn.Module, dropout: float = 0.1):
         super().__init__()
         self.ln1 = nn.LayerNorm(d_model)
@@ -60,31 +66,38 @@ class TransformerBlock(nn.Module):
         self.attention = attention
         self.ffn = FeedForward(d_model, dropout=dropout)
 
-    def forward(self, x: torch.Tensor, mask=None, past_kv=None, use_cache: bool = False):
+    def forward(
+        self, x: torch.Tensor, mask=None, past_kv=None, use_cache: bool = False
+    ):
         # Pre-LN attention with residual — unpack (output, present_kv) tuple
-        attn_out, present_kv = self.attention(self.ln1(x), mask=mask, past_kv=past_kv, use_cache=use_cache)
+        attn_out, present_kv = self.attention(
+            self.ln1(x), mask=mask, past_kv=past_kv, use_cache=use_cache
+        )
         x = x + attn_out
         # Pre-LN FFN with residual
         x = x + self.ffn(self.ln2(x))
         return x, present_kv
 
 
-#############################
-#### Positional Encoding ####
-#############################
+# Positional Encoding
+# -------------------
+
 
 class SinusoidalPositionalEncoding(nn.Module):
     """
     Fixed (non-learned) positional encoding — adds a unique sine/cosine pattern
     to each position so the model knows where each token is.
     """
+
     def __init__(self, d_model: int, max_seq_len: int = 512, dropout: float = 0.1):
         super().__init__()
         self.dropout = nn.Dropout(dropout)
 
         pe = torch.zeros(max_seq_len, d_model)
         position = torch.arange(0, max_seq_len).unsqueeze(1).float()
-        div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
+        div_term = torch.exp(
+            torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model)
+        )
         pe[:, 0::2] = torch.sin(position * div_term)
         pe[:, 1::2] = torch.cos(position * div_term)
         pe = pe.unsqueeze(0)  # (1, max_seq_len, d_model)
@@ -98,25 +111,25 @@ class SinusoidalPositionalEncoding(nn.Module):
         return self.dropout(x)
 
 
+# Full Model: Chess Transformer
+# -----------------------------
 
-########################################
-#### Full Model: Chess Transformeer ####
-########################################
 
 class ChessTransformer(nn.Module):
     """
     Decoder-only transformer for chess move sequence modelling.
     """
+
     def __init__(
-            self, 
-            vocab_size: int,
-            attention_factory: Callable[[], nn.Module],
-            d_model: int = 128,
-            n_heads: int = 4,
-            n_layers: int = 4,
-            max_seq_len: int = DEFAULT_MAX_SEQ_LEN,
-            dropout: float = 0.1,
-            use_sinusoidal_pe: bool = True
+        self,
+        vocab_size: int,
+        attention_factory: Callable[[], nn.Module],
+        d_model: int = 128,
+        n_heads: int = 4,
+        n_layers: int = 4,
+        max_seq_len: int = DEFAULT_MAX_SEQ_LEN,
+        dropout: float = 0.1,
+        use_sinusoidal_pe: bool = True,
     ):
         super().__init__()
         self.d_model = d_model
@@ -136,19 +149,21 @@ class ChessTransformer(nn.Module):
 
         # Stack of transformer blocks
         # attention_factory() is called once per layer — each block gets its own instance
-        self.blocks = nn.ModuleList([
-            TransformerBlock(d_model, attention_factory(), dropout)
-            for _ in range(n_layers)
-        ])
+        self.blocks = nn.ModuleList(
+            [
+                TransformerBlock(d_model, attention_factory(), dropout)
+                for _ in range(n_layers)
+            ]
+        )
 
         # Final layer norm + projection to vocab
         self.ln_final = nn.LayerNorm(d_model)
-        self.head     = nn.Linear(d_model, vocab_size, bias=False)
- 
+        self.head = nn.Linear(d_model, vocab_size, bias=False)
+
         # Weight tying: share token embedding and output projection weights
         # Reduces parameters and typically improves perplexity
         self.head.weight = self.token_emb.weight
- 
+
     def forward(
         self,
         idx: torch.Tensor,
@@ -157,13 +172,17 @@ class ChessTransformer(nn.Module):
         use_cache: bool = False,
     ):
         B, T = idx.shape
-        assert T <= self.max_seq_len, f"Sequence length {T} exceeds max {self.max_seq_len}"
+        assert (
+            T <= self.max_seq_len
+        ), f"Sequence length {T} exceeds max {self.max_seq_len}"
 
         x = self.token_emb(idx)
 
         # During decode (past_key_values provided), all cached tokens are already
         # in the past — no causal mask needed for the new query token(s).
-        past_seq_len = past_key_values[0][0].size(2) if past_key_values is not None else 0
+        past_seq_len = (
+            past_key_values[0][0].size(2) if past_key_values is not None else 0
+        )
         mask = None if past_key_values is not None else causal_mask(T, idx.device)
 
         # Sinusoidal PE uses offset so decode steps receive the correct absolute
@@ -179,7 +198,7 @@ class ChessTransformer(nn.Module):
             x, present_kv = block(x, mask=mask, past_kv=past_kv, use_cache=use_cache)
             present_key_values.append(present_kv)
 
-        x      = self.ln_final(x)
+        x = self.ln_final(x)
         logits = self.head(x)  # (B, T, vocab_size)
 
         loss = None
@@ -191,7 +210,7 @@ class ChessTransformer(nn.Module):
             )
 
         return logits, loss, (present_key_values if use_cache else None)
- 
+
     @torch.no_grad()
     def generate(
         self,
@@ -244,16 +263,14 @@ class ChessTransformer(nn.Module):
                     values, _ = torch.topk(logits, min(top_k, logits.size(-1)))
                     logits[logits < values[:, [-1]]] = float("-inf")
 
-                probs      = F.softmax(logits, dim=-1)
+                probs = F.softmax(logits, dim=-1)
                 next_token = torch.multinomial(probs, num_samples=1)
-                idx        = torch.cat([idx, next_token], dim=1)
+                idx = torch.cat([idx, next_token], dim=1)
         finally:
             if was_training:
                 self.train()
 
         return idx
- 
+
     def count_parameters(self) -> int:
         return sum(p.numel() for p in self.parameters() if p.requires_grad)
- 
-

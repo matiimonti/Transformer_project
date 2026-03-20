@@ -8,26 +8,27 @@ Pipeline:
     4. Serve (input, target) pairs for autoregressive training (future steps)
 """
 
-import re
 import json
-from typing import List, Tuple, Optional
+import re
+from typing import List, Optional, Tuple
 
 import torch
 from torch.utils.data import Dataset
 
-### Special Tokens
+# Special Tokens
+# --------------
 PAD_TOKEN = "<PAD>"
-BOS_TOKEN = "<BOS>"   # beginning of game
-EOS_TOKEN = "<EOS>"   # end of game
+BOS_TOKEN = "<BOS>"  # beginning of game
+EOS_TOKEN = "<EOS>"  # end of game
 UNK_TOKEN = "<UNK>"
 
 SPECIAL_TOKENS = [PAD_TOKEN, BOS_TOKEN, EOS_TOKEN, UNK_TOKEN]
 
 
-
-## Parsing PGN - based after first look at original dataset
+# Parsing PGN - based after first look at original dataset
+# --------------------------------------------------------
 def parse_pgn(pgn_text: str) -> List[List[str]]:
-    """ Parse a PGN string into a list of games, each a list of moves."""
+    """Parse a PGN string into a list of games, each a list of moves."""
 
     games = []
 
@@ -35,32 +36,32 @@ def parse_pgn(pgn_text: str) -> List[List[str]]:
     # Each game is separated by a blank line between the moves and the next game's header.
 
     # Normalize line endings
-    pgn_text = pgn_text.replace('\r\n', '\n').replace('\r', '\n')
+    pgn_text = pgn_text.replace("\r\n", "\n").replace("\r", "\n")
 
-    raw_blocks = re.split(r'\n\n+', pgn_text.strip())
+    raw_blocks = re.split(r"\n\n+", pgn_text.strip())
 
     # Separate each play block
-    i=0
+    i = 0
     game_blocks = []
     while i < len(raw_blocks):
         block = raw_blocks[i].strip()
-        if block.startswith('['):
+        if block.startswith("["):
             if i + 1 < len(raw_blocks):
                 moves_block = raw_blocks[i + 1].strip()
-                if not moves_block.startswith('['):
+                if not moves_block.startswith("["):
                     game_blocks.append(moves_block)
                     i += 2
                     continue
-        i+=1
+        i += 1
 
-    # Clean each block   
+    # Clean each block
     for move_text in game_blocks:
-        move_text = re.sub(r'\{[^}]*\}', ' ', move_text, flags=re.DOTALL)
-        move_text = re.sub(r'\([^)]*\)', ' ', move_text)
-        move_text = re.sub(r'\$\d+', ' ', move_text)
-        move_text = re.sub(r'(1-0|0-1|1/2-1/2|\*)', ' ', move_text)
-        move_text = re.sub(r'\d+\.{1,3}', ' ', move_text)
-        move_text = move_text.replace('#', '').replace('+', '')
+        move_text = re.sub(r"\{[^}]*\}", " ", move_text, flags=re.DOTALL)
+        move_text = re.sub(r"\([^)]*\)", " ", move_text)
+        move_text = re.sub(r"\$\d+", " ", move_text)
+        move_text = re.sub(r"(1-0|0-1|1/2-1/2|\*)", " ", move_text)
+        move_text = re.sub(r"\d+\.{1,3}", " ", move_text)
+        move_text = move_text.replace("#", "").replace("+", "")
         moves = [m.strip() for m in move_text.split() if m.strip()]
 
         # Skip very short or empty games
@@ -69,9 +70,12 @@ def parse_pgn(pgn_text: str) -> List[List[str]]:
 
     return games
 
-## Tokenizer 
 
-class ChessTokenizer: 
+# Tokenizer
+# ---------
+
+
+class ChessTokenizer:
     """
     Simple vocabulary-based tokenizer for chess moves.
 
@@ -89,13 +93,13 @@ class ChessTokenizer:
         for token in SPECIAL_TOKENS:
             self._add_token(token)
 
-    def _add_token(self, token:str) -> int:
+    def _add_token(self, token: str) -> int:
         if token not in self.token2id:
             idx = len(self.token2id)
             self.token2id[token] = idx
             self.id2token[idx] = token
         return self.token2id[token]
-    
+
     def build_from_games(self, games: List[list[str]]):
         """Build the vocabulary from a list of tokenized games"""
         for game in games:
@@ -114,7 +118,7 @@ class ChessTokenizer:
         """Convert integer ids to moves."""
         return [self.id2token.get(i, UNK_TOKEN) for i in ids]
 
-    @property  
+    @property
     def vocab_size(self) -> int:
         return len(self.token2id)
 
@@ -125,15 +129,20 @@ class ChessTokenizer:
     @property
     def bos_id(self) -> int:
         return self.token2id[BOS_TOKEN]
-    
+
     @property
     def eos_id(self) -> int:
         return self.token2id[EOS_TOKEN]
-    
+
     def save(self, path: str):
         with open(path, "w") as f:
-            json.dump({"token2id": self.token2id, "id2token": {int(k): v for k, v in self.id2token.items()}}, f)
-
+            json.dump(
+                {
+                    "token2id": self.token2id,
+                    "id2token": {int(k): v for k, v in self.id2token.items()},
+                },
+                f,
+            )
 
     @classmethod
     def load(cls, path: str) -> "ChessTokenizer":
@@ -145,9 +154,10 @@ class ChessTokenizer:
         tok.token2id = data["token2id"]
         tok.id2token = {int(k): v for k, v in data["id2token"].items()}
         return tok
-    
 
-## Chess Dataset class
+
+# Chess Dataset class
+# -------------------
 class ChessDataset(Dataset):
     """
     Autoregressive dataset: given moves 0..T-1, predict moves 1..T.
@@ -156,38 +166,43 @@ class ChessDataset(Dataset):
     Games shorter than seq_len are padded; longer games are chunked.
     """
 
-    def __init__(self, games: List[List[int]], seq_len: int=128, pad_id: int=0):
+    def __init__(self, games: List[List[int]], seq_len: int = 128, pad_id: int = 0):
         self.seq_len = seq_len
         self.pad_id = pad_id
         self.samples = self._build_samples(games)
 
-    def _build_samples(self, games: List[List[int]]) -> List[Tuple[List[int], List[int]]]:
+    def _build_samples(
+        self, games: List[List[int]]
+    ) -> List[Tuple[List[int], List[int]]]:
         samples = []
         for game in games:
             # Chunk long games into overlapping windows
             for start in range(0, max(1, len(game) - 1), self.seq_len // 2):
-                chunk = game[start: start + self.seq_len + 1]
+                chunk = game[start : start + self.seq_len + 1]
                 if len(chunk) < 3:
                     continue
                 # Pad if needed
                 padded = chunk + [self.pad_id] * (self.seq_len + 1 - len(chunk))
-                inp = padded[:self.seq_len]
-                tgt = padded[1: self.seq_len + 1]
+                inp = padded[: self.seq_len]
+                tgt = padded[1 : self.seq_len + 1]
                 # Replace padding in targets with -1 (ignored by cross_entropy)
                 tgt = [t if t != self.pad_id else -1 for t in tgt]
                 samples.append((inp, tgt))
         return samples
-    
+
     def __len__(self):
         return len(self.samples)
-    
+
     def __getitem__(self, idx):
         inp, tgt = self.samples[idx]
-        return (torch.tensor(inp, dtype=torch.long), torch.tensor(tgt, dtype=torch.long))
+        return (
+            torch.tensor(inp, dtype=torch.long),
+            torch.tensor(tgt, dtype=torch.long),
+        )
 
 
-
-### Full pipeline
+# Full pipeline
+# -------------
 def load_data(
     pgn_path: str,
     seq_len: int = 128,
@@ -195,11 +210,11 @@ def load_data(
     max_bytes: Optional[int] = None,
     train_split: float = 0.9,
 ):
-    with open(pgn_path, 'r', encoding='utf-8', errors='ignore') as f:
+    with open(pgn_path, "r", encoding="utf-8", errors="ignore") as f:
         text = f.read(max_bytes) if max_bytes else f.read()
 
     # Trim to last complete game
-    last_newline = text.rfind('\n\n')
+    last_newline = text.rfind("\n\n")
     if last_newline != -1:
         text = text[:last_newline]
 
@@ -213,17 +228,19 @@ def load_data(
     # Split at the game level — before building overlapping windows.
     split = int(len(games) * train_split)
     train_games = games[:split]
-    val_games   = games[split:]
+    val_games = games[split:]
 
     # Build vocabulary from training games only
     tokenizer = ChessTokenizer()
     tokenizer.build_from_games(train_games)
 
     train_encoded = [tokenizer.encode(g) for g in train_games]
-    val_encoded   = [tokenizer.encode(g) for g in val_games]
+    val_encoded = [tokenizer.encode(g) for g in val_games]
 
-    train_dataset = ChessDataset(train_encoded, seq_len=seq_len, pad_id=tokenizer.pad_id)
-    val_dataset   = ChessDataset(val_encoded,   seq_len=seq_len, pad_id=tokenizer.pad_id)
+    train_dataset = ChessDataset(
+        train_encoded, seq_len=seq_len, pad_id=tokenizer.pad_id
+    )
+    val_dataset = ChessDataset(val_encoded, seq_len=seq_len, pad_id=tokenizer.pad_id)
 
     print(f"Train samples: {len(train_dataset)} | Val samples: {len(val_dataset)}")
 
